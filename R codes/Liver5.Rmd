@@ -1,0 +1,990 @@
+---
+title: "Liver 5"
+author: "Martina Bonomi"
+date: "2023-02-14"
+output: 
+  html_document:
+    number_sections: yes
+    self_contained: yes
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(results='asis')
+knitr::opts_chunk$set(cache=FALSE)
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_knit$set(root.dir = getwd())
+
+library(ggplot2)
+library(tidyverse)
+library(Matrix)
+library(scales)
+library(cowplot)
+library(RCurl)
+library(ggplot2)
+library(devtools)
+library(reconPlots)
+library(png)
+library(knitr)
+library(readxl)
+
+text_size=5
+
+```
+
+
+```{r}
+
+# read a csv file for a plan from fiona's output and create a list of two objects: one object is the dataframe with dvhs, the other one is a dataframe with volumes [cc] for each dvh
+
+
+read_plan <- function(csv_file){
+  
+  # ---------------------------------------------------- #
+  # csv_file -> csv file to read, FIonA output
+  # ---------------------------------------------------- #
+  
+  # read csv file
+  dvh <- read.csv(csv_file)
+  colnames(dvh)[1] <- "Dose"
+  # create df with volumes [cc] from last row of plan
+  vol_cc <- tail(dvh, n=1)
+  vol_cc <- vol_cc[2:length(dvh)]
+  # keep just dvh data
+  dvh <- dvh[1:nrow(dvh)-1,]
+  # convert dose to num (from chr)
+  dvh$Dose <- as.numeric(dvh$Dose)
+  # get organs I have
+  organs <- str_to_title(colnames(dvh)[4:length(dvh)])
+  # create plan > list of dvh and vol 
+  plan <- list(dvh,vol_cc, organs)
+  names(plan) <- c("DVH data", "volumes [cc]", "organs")
+  return(plan)
+}
+
+# ----------------------------------------------------------------------------- #
+
+get_organs <- function(plan){
+  organs <- plan[["organs"]]
+  return(organs)
+}
+
+# ----------------------------------------------------------------------------- #
+
+# find dose or volume values 
+
+find_Dv <- function(plan, v, organ){
+  
+  # ---------------------------------------------------- #
+  # plan -> plan for which you want to find the Dv
+  # v [num] -> volume [%]
+  # organ -> organ for which you want to compute Dv
+  # ---------------------------------------------------- #
+  
+  # get names of DVHs in the plan file
+  dvhs <- colnames(plan[["DVH data"]])
+  
+  # get column idx for wanted organ
+  organ_idx <- which(str_detect(dvhs), toupper(organ))
+  
+  # get organ data and dose values
+  organ_data <- data.frame(x = plan[["DVH data"]]$Dose , y = plan[["DVH data"]][organ_idx])
+  
+  # draw an horizontal line to get the intersection between v and the dvh
+  vol <- data.frame(x = c(0, 10), y = c(v, v))
+  
+  # get intersection
+  intersection <- curve_intersect(organ_data,vol)
+  
+  # return Dv value
+  return(intersection[[1]])
+
+}
+
+# ----------------------------------------------------------------------------- #
+
+find_Vd <- function(plan, d, organ){
+  
+  # ---------------------------------------------------- #
+  # plan -> plan for which you want to find the Vd
+  # d [num] -> dose [%]
+  # organ -> organ for which you want to compute Vd
+  # ---------------------------------------------------- #
+  
+  # get names of DVHs in the plan file
+  dvhs <- colnames(plan[["DVH data"]])
+  
+  # get column idx for wanted organ
+  organ_idx <- which(str_detect(dvhs), toupper(organ))
+  
+  # get idx for wanted dose
+  dose_idx <- which(plan[["DVH data"]]$Dose == d)
+  
+  # get Vd
+  value <- plan[["DVH data"]][organ_idx]
+  
+  return(value)
+}
+
+# ----------------------------------------------------------------------------- #
+
+# Plot different DVHs for different plans or underdoses/overdoses
+
+plot_DVHs <- function(plans, plan_names, dvhs_stat, title){
+  
+  # --------------------------------------------------------------------------------- #
+  # plans [list] -> list of plans you want to compare by plotting them (even one)
+  # plan_names [chr] <- vector of names of your plans
+  # dvhs_stat [logic] -> vector of conditions for dvhs you want to plot (either TRUE or FALSE)
+  # --------------------------------------------------------------------------------- #
+  
+  # get names of plans and DVHs
+  names(plans) <- plan_names
+  dvhs <- toupper(names(dvhs_stat))
+  
+  dvhs_list <- list()
+  dvhs_df <- list()
+  
+  # loop over plans to get wanted DVHs to plot
+  for(plan in plan_names){
+    
+    # list of dvhs you actually want to plot
+    dvhs_list[[plan]] <- list()
+    dvhs_list[[plan]][["Dose"]] <- plans[[plan]][["DVH data"]][,1]
+    
+    # loop over DVHs to select the ones which are set to TRUE
+    for(dvh_idx in 1:length(dvhs)){
+      
+      # if the organ is TRUE, then I add it to the plot
+      if(dvhs_stat[[dvh_idx]]==TRUE){
+        
+        # select position of the organ in the dvh dataframe
+        idx <- which(str_detect(colnames(plans[[plan]][["DVH data"]]), dvhs[dvh_idx]))
+        
+        # selecting current dvh in the dataframe and current name
+        if(dvhs[dvh_idx] == "PTV" || dvhs[dvh_idx] == "CTV" ){
+          curr_dvh_name <- as.character((dvhs[dvh_idx]))
+        } else {
+          curr_dvh_name <- as.character(str_to_title(dvhs[dvh_idx]))
+        }
+        
+        # selecting data of current DVH
+        curr_dvh <- plans[[plan]][["DVH data"]][,idx]
+        
+        # adding current dvh to the dvhs list
+        dvhs_list[[plan]][[curr_dvh_name]] <- curr_dvh
+      }
+    }
+    
+    dvhs_list[[plan]] <- as.data.frame(dvhs_list[[plan]])
+    
+    # gathering together DVHs to plot 
+    dvhs_df[[plan]]  <- dvhs_list[[plan]]  %>% 
+      gather(key = "DHV_curve", value = "value", -Dose)
+    
+    # add label to the plan
+    dvhs_df[[plan]]$Plan <- plan
+    
+  }
+  
+  colors <- c("cornflowerblue","violetred", "orange", "chartreuse","deeppink3", "darkturquoise", "mediumorchid1")
+  
+  # create plot grid
+  plot <- ggplot(dvhs_df[[plan_names[1]]], aes(x=Dose, y=value)) + 
+    ylim(0,105) + 
+    xlab("Dose [%]") +
+    ylab("Volume [%]") 
+  
+  if(title == TRUE){
+    # create plot title
+    title <- c()
+    for(i in 1:length(plan_names)){
+      if(i==length(plan_names)){
+        title <- paste(title, plan_names[i], sep=" ")
+      } else{
+        title <- paste(title, plan_names[i], "vs.", sep=" ")
+      }
+    }
+    plot <- plot + ggtitle(title)
+  } else if(title == FALSE){
+    plot <- plot
+  } else{
+    plot <- plot + ggtitle(title)
+  }
+  
+  # plot DVHs for each plan
+  for(plan in plan_names){
+    if(str_detect(plan, "underdose")==TRUE || str_detect(plan, "overdose")==TRUE){
+      plot <- plot + geom_line(data=dvhs_df[[plan]], aes(color = DHV_curve, linetype=Plan), linewidth=0.4)
+    }else{
+      plot <- plot + geom_line(data=dvhs_df[[plan]], aes(color = DHV_curve, linetype=Plan), linewidth=0.8)
+    }
+  }
+  
+  plot <- plot + scale_color_manual(name = "DVH curves", values = colors)
+  
+  return(plot)
+  
+}
+
+# ----------------------------------------------------------------------------- #
+
+# plot dvhs for different configurations (one dvh at a time)
+
+plot_DVH_comparison <- function(plans, plan_names, dvh, title){
+  
+  # --------------------------------------------------------------------------------- #
+  # plans [list] -> list of plans you want to compare by plotting them (even one)
+  # plan_names [chr] <- vector of names of your plans
+  # dvh -> dvh you want to plot in comparison with the others
+  # --------------------------------------------------------------------------------- #
+  
+  # get names of plans and dvh
+  names(plans) <- plan_names
+  dvh <- toupper(dvh)
+  
+  dvh_list <- list()
+  dvh_df <- list()
+  
+  # loop over plans to get wanted dvh to plot
+  for(plan in plan_names){
+    
+    # list of dvh you actually want to plot
+    dvh_list[[plan]] <- list()
+    dvh_list[[plan]][["Dose"]] <- plans[[plan]][["DVH data"]][,1]
+    
+      
+    # select position of the organ in the dvh dataframe
+    idx <- which(str_detect(colnames(plans[[plan]][["DVH data"]]), dvh))
+      
+    # selecting current dvh in the dataframe and current name
+    if(dvh == "PTV" || dvh == "CTV" ){
+      curr_dvh_name <- as.character((dvh))
+    } else {
+      curr_dvh_name <- as.character(str_to_title(dvh))
+    }
+      
+    # selecting data of current DVH
+    curr_dvh <- plans[[plan]][["DVH data"]][,idx]
+      
+    # adding current dvh to the dvh list
+    dvh_list[[plan]][[curr_dvh_name]] <- curr_dvh
+    
+    dvh_list[[plan]] <- as.data.frame(dvh_list[[plan]])
+    
+    # gathering together dvh to plot 
+    dvh_df[[plan]]  <- dvh_list[[plan]]  %>% 
+      gather(key = "DHV_curve", value = "value", -Dose)
+    
+    # add label to the plan
+    dvh_df[[plan]]$Configuration <- plan
+    
+  }
+  
+  # create plot grid
+  plot <- ggplot(dvh_df[[plan_names[1]]], aes(x=Dose, y=value)) + 
+    ylim(0,105) + 
+    xlab("Dose [%]") +
+    ylab("Volume [%]") 
+  
+  if(title == TRUE){
+    # create plot title
+    title <- c()
+    for(i in 1:length(plan_names)){
+      if(i==length(plan_names)){
+        title <- paste(title, plan_names[i], sep=" ")
+      } else{
+        title <- paste(title, plan_names[i], "vs.", sep=" ")
+      }
+    }
+    plot <- plot + ggtitle(title)
+  } else if(title == FALSE){
+    plot <- plot
+  } else{
+    plot <- plot + ggtitle(title)
+  }
+  
+  # plot dvh for each plan
+  for(plan in plan_names){
+    if(str_detect(plan, "underdose")==TRUE || str_detect(plan, "overdose")==TRUE){
+      plot <- plot + geom_line(data=dvh_df[[plan]], aes(color = Configuration), linewidth=0.4)
+    }else{
+      plot <- plot + geom_line(data=dvh_df[[plan]], aes(color = Configuration), linewidth=0.8)
+    }
+  }
+  
+  return(plot)
+  
+}
+
+# ----------------------------------------------------------------------------- #
+
+# upload comparison table output from FIonA
+
+get_comparison <- function(table_csv, p1_name, p2_name){
+  
+  # ---------------------------------------------------- #
+  # table_csv <- csv file of comparison, FIonA output
+  # p1_name [chr] <- name of plan 1
+  # p2_name [chr] <- name of plan 2
+  # ---------------------------------------------------- #
+  
+  comparison <- read.csv(table_csv)
+  
+  colnames(comparison) <- c("Structure", paste("Volume [cc] - ", p1_name), paste("Volume [cc] - ", p2_name), paste("DMin [%] - ", p1_name), paste("DMin [%] - ", p2_name), paste("DMean [%] - ", p1_name), paste("DMean [%] - ", p2_name), paste("DMax [%] - ", p1_name), paste("DMax [%] - ", p2_name), paste("V95 [%] - ", p1_name), paste("V95 [%] - ", p2_name), paste("D98 [%] - ", p1_name), paste("D98 [%] - ", p2_name), paste("D5-D95 [%] - ", p1_name), paste("D5-D95 [%] - ", p2_name))
+  
+  return(comparison)
+
+  }
+
+# ----------------------------------------------------------------------------- #
+
+# Read robustness table output from FIonA
+
+read_robustness <- function(csv_file, organs){
+  
+  # ---------------------------------------------------- #
+  # csv_file <- csv file of robustness, FIonA output
+  # organs [chr] <- vector of organs of your plan
+  # ---------------------------------------------------- #
+  
+  # read csv file
+  robustness <- read.csv(csv_file)
+  
+  # get DVH names
+  dvhs <- c("PTV", "CTV", toupper(organs))
+  
+  # rename first column as "Dose
+  colnames(robustness)[1] <- "Dose"
+  
+  # rename columns of robustness table assigning correct numbers (num 5 is nominal)
+  for(i in 1:length(dvhs)){
+    
+    # get column idxs for current DVH
+    curr_idxs <- which(str_detect(colnames(robustness), dvhs[i]))
+    
+    # rename each column assigning correct numbers
+    for(j in 1:length(curr_idxs)){
+      colnames(robustness)[curr_idxs[j]] <- paste(dvhs[i], j, sep="_")
+    }
+    
+  }
+  
+  # find NA values and substitute with 0
+  robustness[is.na(robustness)] <- 0   
+  rm(i,j,dvhs)
+  
+  return(robustness)
+}
+
+# ----------------------------------------------------------------------------- #
+
+find_robustness_spread <- function(r){
+  
+  # ----------------------------------------------------------------------------------- #
+  # r [table/dataframe] <- robustness table/df for which you want to find the robustness spread
+  # ----------------------------------------------------------------------------------- #
+  
+  # get Dose values from the robustness table
+  r_spread <- r$Dose
+  r_spread <- as.data.frame(r_spread)
+  colnames(r_spread) <- "Dose"
+  
+  # get DVH names 
+  dvhs <- colnames(r)
+  for(i in 1:length(dvhs)){
+    dvhs[i] <- str_split(dvhs[i], pattern="_")[[1]][1]
+  }
+  dvhs <- unique(dvhs)
+  dvhs <- dvhs[-1]
+  
+  # loop over each DVH to find minima and maxima of each DVH
+  for(dvh in dvhs){
+    
+    # get dataframe of current DVH from the robustness table
+    curr_dvh_idxs <- which(str_detect(colnames(r), dvh))
+    curr_dvh <- r[curr_dvh_idxs[1]:tail(curr_dvh_idxs,n=1)]
+    
+    curr_dvh_max <- c()
+    curr_dvh_min <- c()
+    
+    # get maxima for current DVH
+    for(idx in 1:length(r$Dose)){
+      curr_dvh_max[idx] <- max(curr_dvh[idx,])
+    }
+    
+    # get minima for current DVH
+    for(idx in 1:length(r$Dose)){
+      curr_dvh_min[idx] <- min(curr_dvh[idx,])
+    }
+    
+    # add columns of nominal, minima and maxima values of current DVH to spread table
+    r_spread[[paste(dvh, "_nom", sep="")]] <- curr_dvh[[paste(dvh,"_5",sep="")]]
+    r_spread[[paste(dvh, "_max", sep="")]] <- curr_dvh_max
+    r_spread[[paste(dvh, "_min", sep="")]] <- curr_dvh_min
+
+    rm(curr_dvh_idxs,curr_dvh,curr_dvh_max,curr_dvh_min)
+  }
+  
+  return(r_spread)
+  
+}
+
+# ----------------------------------------------------------------------------- #
+
+
+plot_robustness <- function(robustness, plan_names, dvhs_stat, title){
+  
+  # ----------------------------------------------------------------------------------- #
+  # robustness [list] <- list of robustness tables/dfs for which you want to plot the robustness spread
+  # plan_names [chr] <- vector with names of plans for which you want to plot the robustness
+  # dvhs_stat [logic] <- vector with logical conditions for DVHs to plot (either TRUE or FALSE)
+  # ----------------------------------------------------------------------------------- #
+  
+  # for each robustness table in the input list, find robustness spread
+  for(r in 1:length(robustness)){
+    robustness[[r]] <- find_robustness_spread(robustness[[r]])
+  }
+  
+  # set plan names
+  names(robustness) <- plan_names
+  dvhs <- toupper(names(dvhs_stat))
+  
+  dvhs_nom <- list()
+  dvhs_min <- list()
+  dvhs_max <- list()
+  
+  nom_df <- list()
+  min_df <- list()
+  max_df <- list()
+  
+  # loop over each plan to select just wanted DVHs
+  for(plan in plan_names){
+    
+    # create nominal DVH list
+    dvhs_nom[[plan]] <- list()
+    dvhs_nom[[plan]][["Dose"]] <- robustness[[plan]]$Dose
+    
+    # create minima DVH list
+    dvhs_min[[plan]] <- list()
+    dvhs_min[[plan]][["Dose"]] <- robustness[[plan]]$Dose
+    
+    # create maxima DVH list
+    dvhs_max[[plan]] <- list()
+    dvhs_max[[plan]][["Dose"]] <- robustness[[plan]]$Dose
+    
+    # loop over DVHs to select the TRUE ones
+    for(dvh_idx in 1:length(dvhs)){
+      
+      # if the organ is TRUE, I select the correspondent values
+      if(dvhs_stat[[dvh_idx]]==TRUE){
+        
+        # select position of the organ in the dvh dataframe
+        idx_nom <- which(str_detect(colnames(robustness[[plan]]), paste(dvhs[dvh_idx],"_nom",sep="")))
+        idx_min <- which(str_detect(colnames(robustness[[plan]]), paste(dvhs[dvh_idx],"_min",sep="")))
+        idx_max <- which(str_detect(colnames(robustness[[plan]]), paste(dvhs[dvh_idx],"_max",sep="")))
+        
+        # selecting current dvh in the dataframe and current name
+        if(dvhs[dvh_idx] == "PTV" || dvhs[dvh_idx] == "CTV" ){
+          curr_dvh_name <- as.character((dvhs[dvh_idx]))
+        } else {
+          curr_dvh_name <- as.character(str_to_title(dvhs[dvh_idx]))
+        }
+        
+        # adding current nominal, minima and maxima DVHs to previous lists
+        dvhs_nom[[plan]][[curr_dvh_name]] <- robustness[[plan]][,idx_nom]
+        dvhs_min[[plan]][[curr_dvh_name]] <- robustness[[plan]][,idx_min]
+        dvhs_max[[plan]][[curr_dvh_name]] <- robustness[[plan]][,idx_max]
+      }
+    }
+    
+    # transforming lists into dataframes
+    dvhs_nom[[plan]] <- as.data.frame(dvhs_nom[[plan]])
+    dvhs_min[[plan]] <- as.data.frame(dvhs_min[[plan]])
+    dvhs_max[[plan]] <- as.data.frame(dvhs_max[[plan]])
+    
+    # gather nominal, minima and maxima curves together
+    nom_df[[plan]]  <- dvhs_nom[[plan]]  %>% 
+      gather(key = "DVH_nom", value = "value", -Dose)
+    min_df[[plan]]  <- dvhs_min[[plan]]  %>% 
+      gather(key = "DVH_min", value = "value", -Dose)
+    max_df[[plan]]  <- dvhs_max[[plan]]  %>% 
+      gather(key = "DVH_max", value = "value", -Dose)
+    
+    # adding plan label
+    nom_df[[plan]]$Plan <- plan
+    min_df[[plan]]$Plan <- plan
+    max_df[[plan]]$Plan <- plan
+    
+    # adding type label
+    nom_df[[plan]]$Curve <- "Nominal"
+    min_df[[plan]]$Curve <- "Spread"
+    max_df[[plan]]$Curve <- "Spread"
+    
+    # adding plan and type label
+    nom_df[[plan]]$Plan_Curve <- paste(nom_df[[plan]]$Plan, nom_df[[plan]]$DVH_nom, sep=" - ")
+    min_df[[plan]]$Plan_Curve <- paste(min_df[[plan]]$Plan, min_df[[plan]]$DVH_min, sep=" - ")
+    max_df[[plan]]$Plan_Curve <- paste(max_df[[plan]]$Plan, max_df[[plan]]$DVH_max, sep=" - ")
+    
+  }
+  
+  colors <- c("cornflowerblue","violetred", "orange", "chartreuse","deeppink3", "darkturquoise", "mediumorchid1", "gold")
+  
+  # creating basic grid for plot
+  plot <- ggplot(nom_df[[plan_names[1]]], aes(x=Dose, y=value)) + 
+    ylim(0,105) + 
+    xlab("Dose [%]") +
+    ylab("Volume [%]")
+  
+  # creating title for the plot
+  if(title == TRUE){
+    # create plot title
+    title <- c()
+    for(i in 1:length(plan_names)){
+      if(i==length(plan_names)){
+        title <- paste(title, plan_names[i], sep=" ")
+      } else{
+        title <- paste(title, plan_names[i], "vs.", sep=" ")
+      }
+    }
+    plot <- plot + ggtitle(title)
+  } else if(title == FALSE){
+    plot <- plot
+  } else{
+    plot <- plot + ggtitle(title)
+  }
+  
+  # plotting DVHs for each plan
+  for(plan in plan_names){
+    plot <- plot + geom_line(data=nom_df[[plan]], aes(color = Plan_Curve, linetype=Curve), linewidth=0.8) +
+      geom_line(data=min_df[[plan]], aes(color = Plan_Curve, linetype=Curve), linewidth=0.4) +
+      geom_line(data=max_df[[plan]], aes(color = Plan_Curve, linetype=Curve), linewidth=0.4)
+  }
+  
+  #plot <- plot + scale_color_manual(name = "DVH curves", values = colors)
+  
+  return(plot)
+  
+}
+
+
+# ---------------------------------------------------------------------------- #
+
+# get energies for each field and total number of spot for the current plan
+
+get_energies <- function(fields.csv, fields_num, tot_spots){
+  
+  # -------------------------------------------------------------------------- #
+  # fields.csv [chr] <- vector with csv file names for each field
+  # fields_num [chr] <- vector with field numbers
+  # -------------------------------------------------------------------------- #
+  
+  energies <- list()
+
+  for(field in 1:length(fields.csv)){
+    
+    curr_field_df <- read.csv(fields.csv[field], sep=" ", header = FALSE)
+    colnames(curr_field_df) <- c("n_spots", "energy")
+    curr_field <- list()
+    curr_field[["Energy values"]] <- unique(curr_field_df$energy)
+    curr_field[["Number of energies"]] <- length(unique(curr_field_df$energy))
+    energies[[fields_num[field]]] <- curr_field
+    rm(curr_field_df)
+    
+  }
+  
+  energies[["Tot. spots"]] <- tot_spots
+  
+  return(energies)
+  
+}
+
+# ----------------------------------------------------------------------------- #
+
+# calculates the dead time to change spot position and energy value for a plan
+
+dead_time <- function(TS, TE, plan_energies){
+  
+  # ---------------------------------------------------------- #
+  # TS [num] <- time [ms] to change position between two spots
+  # TE [num] <- time [ms] to change energy between two layers
+  # plan_energies <- output of get_energies for a plan
+  # ---------------------------------------------------------- #
+  
+  # calculate dead time for spot positioning
+  ts <- TS*plan_energies[["Tot. spots"]]
+  
+  # calculate dead time for energy change
+  fields <- names(plan_energies)
+  rm_last <- which(fields == tail(fields,n=1))
+  fields <- fields[-rm_last]
+  
+  te <- 0
+  for(field in fields){
+    te <- te + TE*p1_energies[[field]][["Number of energies"]]
+  }
+  
+  # converting dead time from ms to s
+  dt <- (ts+te)*1e-3
+  
+  return(dt)
+  
+}
+
+
+
+```
+
+
+
+In this pipeline we are going to compare different plans for proton therapy, either with or without the use of a Ridge Filter.
+```{r}
+setwd("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5")
+
+plan1 <- read_plan("Plan 1/dvhs_nominal.csv")
+plan2 <- read_plan("Plan 2/dvhs_nominal.csv")
+plan3 <- read_plan("Plan 3/dvhs_nominal.csv")
+```
+
+The organs at risk (OAR) involved in this case are:
+```{r}
+cat("\n\n")
+get_organs(plan = plan1)
+```
+
+
+# Plan 1
+
+The first plan is composed by two fields F0 and F1 was calculated by using the following settings:
+
+- target: PTV
+- preabsorber: Auto
+- nozzle: 15
+
+for both fields F0 and F1, and:
+
+- gantry angle for F0: 130
+- couch angle for F0: 180
+- gantry angle for F1: 110
+- couch angle for F1: 0
+
+
+```{r}
+plot_DVHs(plans = list(plan1), plan_names = "Plan 1", dvhs_stat = c(PTV=TRUE, CTV=TRUE, LIVER=TRUE, STOMACH=TRUE), title = "Plan 1 - no RF") 
+ggsave()
+
+```
+
+# Plan 2
+
+The second plan is also composed by two fields F0 and F1 and was calculated by using the following settings:
+
+- target: PTV
+- preabsorber: Auto
+- nozzle: 15
+
+for both fields F0 and F1, and:
+
+- gantry angle for F0: 45
+- couch angle for F0: 180
+- gantry angle for F1: 55
+- couch angle for F1: 0
+
+```{r}
+plot_DVHs(plans = list(plan2), plan_names = "Plan 2", dvhs_stat = c(PTV=TRUE, CTV=TRUE, LIVER=TRUE, STOMACH=TRUE), title = TRUE) 
+```
+
+# Plan 1 and Plan 2 comparison
+
+We can compare the two plans on the same plot, either by plotting all the DVHs or by selecting some of them:
+
+```{r}
+plot_DVHs(plans = list(plan1,plan2), plan_names = c("Plan 1", "Plan 2"), dvhs_stat = c(PTV=TRUE, CTV=TRUE, LIVER=TRUE, STOMACH=TRUE), title = TRUE) 
+
+plot_DVHs(plans = list(plan1,plan2), plan_names = c("Plan 1", "Plan 2"), dvhs_stat = c(PTV=TRUE, CTV=FALSE, LIVER=TRUE, STOMACH=FALSE), title = TRUE) 
+```
+
+As we can see from the DVHs in the plots above, Plan 1 is better than Plan 2 since the DVHs for the OAR are much lower, meaning that we have less dose delivered to these organs.
+
+We can visually see that by looking at the following plans' screenshots:
+
+## Visual comparison between Plan 1 and Plan 2 - heat map
+```{r}
+setwd("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5")
+
+img <- readPNG(source="Plans comparison/P1_P2_comparison.png")
+grid::grid.raster(img)
+```
+
+## Visual comparison between Plan 1 and Plan 2 - target coverage map
+```{r}
+setwd("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5")
+
+img <- readPNG(source="Plans comparison/P1_P2_comparison_target_coverage.png")
+grid::grid.raster(img)
+```
+
+
+## DVHs characteristics
+To better analyze the differences between these two plans, we can compare them by looking at the following table:
+
+```{r}
+setwd("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5")
+
+df <- get_comparison("Plans comparison/statistics_P1_p2.csv", "Plan 1", "Plan 2")
+kable(df)
+```
+
+By looking at the values of V95 for CTV and D98 for PTV, we could say at first that Plan 2 is better than Plan 1, since both these values for Plan 2 are higher than for Plan 1. 
+
+Indeed, V95 = 100.00 indicates that the whole CTV volume in Plan 2 receives at least 95% of the dose, meanwhile for Plan 1 we have V95 = 95.27, indicating that only 95.27% of the CTV volume receives 95% of the dose. 
+The same considerations can be made also for D98, which indicates the minimum dose that 98% of the volume of an organ receives. 
+These are both measures of the target coverage.
+
+However, if we look at the mean dose received by the organs we can clearly say that Plan 1 is better than Plan 2, since in the latter the mean dose delivered to the OAR is higher than in the former.
+Moreover, if we look at the values of D5-D95 of the PTV, we could say that Plan 1 has a higher homogeneity in the delivered dose, since this value is smaller than the one for Plan 2, indicating a steeper dose fall-off.
+
+
+## Robustness analysis
+We can next visualize the output from robustness analysis.
+
+Also in this case we can select the DVHs of interest and compare more than one plan.
+
+```{r}
+setwd("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5")
+
+cat("\n\n")
+r1 <- read_robustness("Plan 1/dvhs_robustness.csv", organs = c("liver","stomach"))
+r2 <- read_robustness("Plan 2/dvhs_robustness.csv", organs = c("liver","stomach"))
+r <- list(r1,r2)
+names(r) <- c("Plan 1", "Plan 2")
+```
+
+
+```{r}
+plot_robustness(robustness = list(r1), plan_names = c("Plan 1"), dvhs_stat = c(PTV=TRUE,CTV=TRUE,STOMACH=TRUE,LIVER=TRUE), title = FALSE)
+```
+
+
+```{r}
+plot_robustness(robustness = list(r2), plan_names = c("Plan 2"), dvhs_stat = c(PTV=TRUE,CTV=TRUE,STOMACH=TRUE,LIVER=TRUE), title = FALSE)
+```
+
+From these plots, we could say that Plan 2 seems more robust than Plan 1, at least for what it concerns the OAR, since the spread around the nominal curves is smaller. This is very clear for example for the liver, as shown below:
+
+```{r}
+plot_robustness(robustness = list(r1,r2), plan_names = c("Plan 1", "Plan 2"), dvhs_stat = c(PTV=FALSE,CTV=FALSE,STOMACH=FALSE,LIVER=TRUE), title = FALSE)
+```
+
+Finally, we could also recalculate the dose to see the underdose and overdose for the two plans.
+
+```{r}
+setwd("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5")
+
+p1_overdose <- read_plan("Plan 1/dvhs_overdose.csv")
+p1_underdose <- read_plan("Plan 1/dvhs_underdose.csv")
+
+p2_overdose <- read_plan("Plan 2/dvhs_overdose.csv")
+p2_underdose <- read_plan("Plan 2/dvhs_underdose.csv")
+
+plot_DVHs(plans = list(plan1,p1_overdose,p1_underdose), plan_names = c("Plan 1 - nominal", "Plan 1 - overdose", "Plan 1 - underdose"), dvhs_stat = c(PTV=TRUE,CTV=TRUE,STOMACH=TRUE,LIVER=TRUE), title = "Plan 1 - Underdose vs. Overdose")
+
+plot_DVHs(plans = list(plan2,p2_overdose,p2_underdose), plan_names = c("Plan 2 - nominal", "Plan 2 - overdose", "Plan 2 - underdose"), dvhs_stat = c(PTV=TRUE,CTV=TRUE,STOMACH=TRUE,LIVER=TRUE), title = "Plan 2 - Underdose vs. Overdose")
+
+```
+
+In this case, instead, we can visually see that Plan 1 gives us better results for the OAR since the deviation of the overdose and the underdose form the nominal dose distribution is not as large as for Plan 2, meanwhile for the CTV Plan 2 is better.
+
+# Plan 3 - Ridge Filter
+
+We now analyze a plan with the use of a Ridge Filter (RF).
+
+This plan is composed by two fields F0 and F1 which were calculated by using the same setting as Plan 1, with the only difference that in this case $\Delta U = \Delta T = 0.47$, since, as the beam passes through the filter, it undergoes scattering and increases in size.
+
+The DVHs of this plan are shown below:
+```{r}
+plot_DVHs(plans = list(plan3), plan_names = "Plan 3", dvhs_stat = c(PTV=TRUE, CTV=TRUE, LIVER=TRUE, STOMACH=TRUE), title = TRUE) 
+```
+
+We would like to compare Plan 1 with Plan 3 and see which are the differences in using a Ridge Filter with pencil beam scanning (PBS). In particular, we would like to count the number of spots and the number of energies in the two cases.
+
+The number of spots and energy layers used in Plan 1 is:
+```{r}
+setwd("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5")
+
+p1_fields.csv <- c("Plan 1/energies_F0.csv","Plan 1/energies_F1.csv")
+p1_fields_num <- c("F0","F1")
+p1_energies <- get_energies(p1_fields.csv, p1_fields_num, tot_spots = 14435)
+
+print(paste("Number of spots:",p1_energies[["Tot. spots"]]))
+print(paste("Number of energy layers in F0:",p1_energies[["F0"]][["Number of energies"]]))
+print(paste("Number of energy layers in F1:",p1_energies[["F1"]][["Number of energies"]]))
+
+```
+
+meanwhile, the number of spots used in Plan 3 is:
+```{r}
+setwd("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5")
+
+p3_fields.csv <- c("Plan 3/energies_F0.csv","Plan 3/energies_F1.csv")
+p3_fields_num <- c("F0","F1")
+p3_energies <- get_energies(p3_fields.csv, p3_fields_num, tot_spots = 1553)
+
+print(paste("Number of spots:",p3_energies[["Tot. spots"]]))
+print(paste("Number of energy layers in F0:",p3_energies[["F0"]][["Number of energies"]]))
+print(paste("Number of energy layers in F1:",p3_energies[["F1"]][["Number of energies"]]))
+```
+
+As we can see, the use of the RF leads to two main benefits:
+
+- the decrease of the number of energy layers, due to the fact that we create a small spread-out Bragg Peak (SOBP), thus spreading the energy range of the beam arriving at a certain spot position 
+
+- the decrease of the number of spots, due to the fact that the beam enlarges a bit when traversing the filter and due to the reduction of the number of energy layers
+
+In this way, by using a RF, we can reduce the plan delivery time to the patient. Indeed, if we measure the dead time of the two plans and we compare them, if we consider a spot positioning time of about 2ms and an energy adjustment time of about 150ms, we get:
+```{r}
+TS = 2
+TE = 150
+dt_1 <- dead_time(TS,TE,p1_energies)
+dt_3 <- dead_time(TS,TE,p3_energies)
+
+print(paste("Dad time for Plan 1:", dt_1, "s"))
+print(paste("Dad time for Plan 3:", dt_3, "s"))
+```
+
+which corresponds to a time reduction percentage of about:
+```{r}
+(dt_1-dt_3)/dt_1
+```
+
+Below, we show the difference between the DVHs for Plan 1 and Plan 3:
+```{r}
+plot_DVHs(plans = list(plan1,plan3), plan_names = c("Plan 1", "Plan 3"), dvhs_stat = c(PTV=TRUE, CTV=TRUE, LIVER=TRUE, STOMACH=TRUE), title = TRUE) 
+```
+
+and we plot the results of the robustness analysis for both plans:
+```{r}
+setwd("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5")
+
+cat("\n\n")
+r1 <- read_robustness("Plan 1/dvhs_robustness.csv", organs = c("liver","stomach"))
+r3 <- read_robustness("Plan 3/dvhs_robustness.csv", organs = c("liver","stomach"))
+r <- list(r1,r3)
+names(r) <- c("Plan 1", "Plan 3")
+
+plot_robustness(robustness = list(r1), plan_names = c("Plan 1"), dvhs_stat = c(PTV=TRUE,CTV=TRUE,STOMACH=TRUE,LIVER=TRUE), title = TRUE)
+
+plot_robustness(robustness = list(r3), plan_names = c("Plan 3"), dvhs_stat = c(PTV=TRUE,CTV=TRUE,STOMACH=TRUE,LIVER=TRUE), title = TRUE)
+```
+
+From these plots, we can see that the robustness of the plans is quite similar. The main difference that can be seen is that the planned dose to be delivered to the liver is more robust for Plan 3 than for Plan 1, as we can better see below:
+```{r}
+plot_robustness(robustness = list(r1,r3), plan_names = c("Plan 1", "Plan 3"), dvhs_stat = c(PTV=FALSE,CTV=FALSE,STOMACH=FALSE,LIVER=TRUE), title = TRUE)
+```
+
+???
+
+```{r}
+plot_robustness(robustness = list(r1,r3), plan_names = c("Plan 1", "Plan 3"), dvhs_stat = c(PTV=FALSE,CTV=FALSE,STOMACH=TRUE,LIVER=FALSE), title = TRUE)
+```
+
+# Set up different configurations with the Ridge Filter
+We tried different configurations of spot placement for our set up with the Ridge Filter.
+
+We arranged spots by considering:
+
+- spot spacing based on spot size in air, water or on a fixed grid with $\Delta U = \Delta T = 0.47 cm$
+- spot positioning using an hexagonal or a rectilinear grid
+- constant layer spacing factor of 3
+
+We have thus six different configurations:
+- Rectilinear fixed grid with $\Delta U = \Delta T = 0.47 cm$
+- Hexagonal fixed grid with with $\Delta U = \Delta T = 0.47 cm$
+- Rectilinear grid with spot spacing in air with a spot spacing factor of 1.2
+- Hexagonal grid with spot spacing in air with a spot spacing factor of 1.2
+- Rectilinear grid with spot spacing in water with a spot spacing factor of 1.5
+- Hexagonal grid with spot spacing in water with a spot spacing factor of 1.5
+
+The difference in the spot spacing factor for the spot placings in water and in air is due to che choice we made for the best optimized plan that gave a us a better result of PTV V95.
+
+Below is shown the table with the configuration parameters and the values of PTV V95 and the number of spots obtained for each of the six configurations.
+```{r}
+# read optimization table
+
+# opt_table <- read.csv("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5/best_opt.csv", header=TRUE, sep=";")
+
+opt_table <- read_excel("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5/best_opt.xlsx")
+opt_table <- as.data.frame(opt_table)
+
+#names(opt_table[,2]) <- "Number of spots"
+#names(opt_table[,3]) <- "PTV V95 [%]"
+#names(opt_table[,4]) <- "Sigma [cm]"
+#names(opt_table[,5]) <- "Margin [cm]"
+#names(opt_table[,6]) <- "Dose at margin [%]"
+#names(opt_table[,8]) <- "Structure margin [cm]"
+
+kable(opt_table)
+```
+Below is shown the values of PTV V95 vs. the number of spots for each configuration.
+```{r}
+
+df_v95_nspots <- data_frame("PTV_V95" = as.numeric(opt_table[,3]), "n_spots" = as.numeric(opt_table[,2]), "Configuration" = opt_table[,1])
+
+# plot the PTV V95 vs. spots
+ggplot(df_v95_nspots, aes(x=PTV_V95, y=n_spots)) + 
+  geom_point(aes(x=PTV_V95, y=n_spots, color=Configuration), size=4) +
+  xlab("PTV V95 [%]") +
+  ylab("Number of Spots")
+```
+
+As we can see from this plot, the best configurations which give us the highest values of PTV V95 and the lowest number of spots is the one with spot placing using spot size in water.
+
+To further analyze these results, we can plot the DVHs for the PTV and the organs.
+
+```{r}
+# load dvhs for each configuration
+R_grid <- read_plan("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5/DVHs optimization/Rgrid.csv")
+H_grid <- read_plan("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5/DVHs optimization/Hgrid.csv")
+R_air <- read_plan("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5/DVHs optimization/Rair.csv")
+H_air <- read_plan("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5/DVHs optimization/Hair.csv")
+R_water <- read_plan("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5/DVHs optimization/Rwat.csv")
+H_water <- read_plan("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5/DVHs optimization/Hwat.csv")
+
+plans <- list(R_grid, H_grid, R_air, H_air, R_water, H_water)
+plan_names <- c("R grid", "H grid", "R air (ssf = 1.2)", "H air (ssf = 1.2)", "R water (ssf = 1.5)", "H water (ssf = 1.5)")
+
+PTV <- plot_DVH_comparison(plans = plans, plan_names = plan_names, dvh = "PTV", title = "PTV comparison for the different configurations")
+PTV + coord_cartesian(xlim=c(85,120))
+```
+
+As we can see from this plot, the PTV DVHs of the two configurations using spot placement in water are overlapped and are the steepest ones compared to others.
+
+If we look instead to the DVHs for the two organs, we can see that the best curves are actually not from the spot placement in water configurations. These are actually the "worst":
+
+```{r}
+liver <- plot_DVH_comparison(plans = plans, plan_names = plan_names, dvh = "liver", title = "Liver DVHs comparison for the different configurations")
+liver + coord_cartesian(ylim=c(0,20))
+
+stomach <- plot_DVH_comparison(plans = plans, plan_names = plan_names, dvh = "stomach", title = "Stomach DVHs comparison for the different configurations")
+stomach + coord_cartesian(ylim=c(0,25))
+```
+
+Finally, we can visually see the robustness of the CTV for each configuration.
+
+```{r}
+# robustness spread
+CTV_Rgrid <- read_robustness("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5/DVHs robustness/CTV_Rgrid.csv", organs = c())
+CTV_Hgrid <- read_robustness("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5/DVHs robustness/CTV_Hgrid.csv", organs = c())
+CTV_Rair <- read_robustness("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5/DVHs robustness/CTV_Rair.csv", organs = c())
+CTV_Hair <- read_robustness("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5/DVHs robustness/CTV_Hair.csv", organs = c())
+CTV_Rwat <- read_robustness("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5/DVHs robustness/CTV_Rwat.csv", organs = c())
+CTV_Hwat <- read_robustness("/Users/martinabonomi/Library/Mobile Documents/com~apple~CloudDocs/Planning/Liver5/DVHs robustness/CTV_Hwat.csv", organs = c())
+
+CTV_rob <- plot_robustness(robustness = list(CTV_Rgrid, CTV_Hgrid, CTV_Rair, CTV_Hair, CTV_Rwat, CTV_Hwat), plan_names = c("R grid", "H grid", "R air", "H air", "R water", "H water"), dvhs_stat = c(PTV=FALSE, CTV=TRUE, LIVER=FALSE, STOMACH=FALSE), title = "CTV robustness spread")
+CTV_rob + coord_cartesian(xlim=c(85,120))
+```
+
+As we can see, the plans are pretty robust since the spread around the nominal curve is very small. In this case, the steepest and best CTV is R water.
